@@ -221,24 +221,6 @@ async function normalizeMonoSort() {
 }
 
 
-//重複削除
-async function removeDuplicateCategories() {
-  try {
-    await pool.query(`
-      DELETE FROM categories a
-      USING categories b
-      WHERE a.id > b.id
-      AND a.name = b.name
-    `);
-
-    console.log("重複カテゴリー整理OK");
-
-  } catch (err) {
-    console.error(err);
-  }
-}
-
-
 // カテゴリーの取得
 //カテゴリーの順番の取得
 app.get("/api/categories", async (req, res) => {
@@ -390,7 +372,6 @@ const PORT = process.env.PORT || 3000;
 
 async function startServer() {
   await initDB();
-  await removeDuplicateCategories();
   await insertDefaultCategories();
   await normalizeMonoSort();
 
