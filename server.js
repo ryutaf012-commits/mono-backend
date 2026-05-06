@@ -4,17 +4,47 @@ const express = require("express");
 const cors = require("cors");
 
 
-//SQlite関連
-const sqlite3 = require("sqlite3").verbose();
+//DB関連
+const { Pool } = require("pg")
+// 環境変数接続
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: {
+    rejectUnauthorized: false,
+  },
+});
 // DBファイル作成（なければ自動作成）
-const db = new sqlite3.Database("./monos.db");
+// const db = new sqlite3.Database("./monos.db");
 
-db.serialize(() => {
+// db.serialize(() => {
 
-  //項目のDB
-  db.run(`
+//   //項目のDB
+//   db.run(`
+//     CREATE TABLE IF NOT EXISTS monos (
+//       id INTEGER PRIMARY KEY AUTOINCREMENT,
+//       text TEXT,
+//       category TEXT,
+//       sort INTEGER,
+//       detail TEXT
+//     )
+//   `);
+
+//   //カテゴリーのDB
+//   db.run(`
+//     CREATE TABLE IF NOT EXISTS categories (
+//       id INTEGER PRIMARY KEY AUTOINCREMENT,
+//       name TEXT,
+//       sort INTEGER
+//     )
+//   `);
+
+// });
+
+
+async function initDB() {
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS monos (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id SERIAL PRIMARY KEY,
       text TEXT,
       category TEXT,
       sort INTEGER,
@@ -22,33 +52,43 @@ db.serialize(() => {
     )
   `);
 
-  //カテゴリーのDB
-  db.run(`
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS categories (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id SERIAL PRIMARY KEY,
       name TEXT,
       sort INTEGER
     )
   `);
+}
 
-});
+initDB();
+
+
+
 //デフォルトのカテゴリー
 const defaultCategories = ["未分類", "日用品", "調味料", "野菜"];
 
-defaultCategories.forEach((name, index) => {
-  db.get(
-    "SELECT COUNT(*) as count FROM categories WHERE name = ?",
-    [name],
-    (err, row) => {
-      if (row.count === 0) {
-        db.run(
-          "INSERT INTO categories (name, sort) VALUES (?, ?)",
-          [name, index] // 順番もここで決める
-        );
-      }
+async function insertDefaultCategories() {
+  for (const [index, name] of defaultCategories.entries()) {
+
+    // 既に存在するか確認
+    const exists = await pool.query(
+      "SELECT * FROM categories WHERE name = $1",
+      [name]
+    );
+
+    // 無ければ追加
+    if (exists.rows.length === 0) {
+      await pool.query(
+        "INSERT INTO categories (name, sort) VALUES ($1, $2)",
+        [name, index]
+      );
     }
-  );
-});
+  }
+}
+
+insertDefaultCategories();
+
 const app = express();
 
 app.use(cors());
@@ -56,198 +96,280 @@ app.use(express.json());
 
 
 // ① POST（追加）
-app.post("/api/monos", (req, res) => {
-  const { text, category,detail } = req.body;
+app.post("/api/monos", async (req, res) => {
+  try {
+    const { text, category, detail } = req.body;
 
-  db.get("SELECT MAX(sort) as max FROM monos", (err, row) => {
-    const nextSort = (row.max || 0) + 1;
-
-    db.run(
-      "INSERT INTO monos (text, category, sort, detail) VALUES (?, ?, ?, ?)",
-  [text, category, nextSort, detail || ""],
-      function (err) {
-        if (err) return res.status(500).send(err);
-
-        res.json({
-          id: this.lastID,
-          text,
-          category,
-          sort: nextSort
-        });
-      }
+    // 現在の最大sort取得
+    const maxResult = await pool.query(
+      "SELECT MAX(sort) as max FROM monos"
     );
-  });
+
+    const nextSort = (maxResult.rows[0].max || 0) + 1;
+
+    // INSERT
+    const result = await pool.query(
+      `
+      INSERT INTO monos (text, category, sort, detail)
+      VALUES ($1, $2, $3, $4)
+      RETURNING *
+      `,
+      [text, category, nextSort, detail || ""]
+    );
+
+    // 追加したデータ返却
+    res.json(result.rows[0]);
+
+  } catch (err) {
+    res.status(500).send(err);
+  }
 });
 
 // ② GET（取得） 
-app.get("/api/monos", (req, res) => {
-  db.all("SELECT * FROM monos ORDER BY sort ASC", [], (err, rows) => {
-    if (err) return res.status(500).send(err);
+app.get("/api/monos", async (req, res) => {
+  try {
+    const result = await pool.query(
+      "SELECT * FROM monos ORDER BY sort ASC"
+    );
 
-    res.json(rows);
-  });
+    res.json(result.rows);
+
+  } catch (err) {
+    res.status(500).send(err);
+  }
 });
 
 //削除
-app.delete("/api/monos/:id", (req, res) => {
-  const id = req.params.id;
-  db.run("DELETE FROM monos WHERE id = ?", [id], (err) => {
-    if (err) return res.status(500).send(err);
+app.delete("/api/monos/:id", async (req, res) => {
+  try {
+    const id = req.params.id;
+
+    await pool.query(
+      "DELETE FROM monos WHERE id = $1",
+      [id]
+    );
+
     res.json({ message: "削除OK" });
-  });
+
+  } catch (err) {
+    res.status(500).send(err);
+  }
 });
 
 
 //順番変更
-app.put("/api/monos/reorder", (req, res) => {
-  const { items } = req.body;
+app.put("/api/monos/reorder", async (req, res) => {
+  try {
+    const { items } = req.body;
 
-  const stmt = db.prepare("UPDATE monos SET sort = ? WHERE id = ?");
+    for (const item of items) {
+      await pool.query(
+        "UPDATE monos SET sort = $1 WHERE id = $2",
+        [item.sort, item.id]
+      );
+    }
 
-  items.forEach((item) => {
-    stmt.run(item.sort, item.id);
-  });
+    res.json({ message: "Mono順番更新OK" });
 
-  stmt.finalize();
-
-  res.json({ message: "Mono順番更新OK" });
+  } catch (err) {
+    res.status(500).send(err);
+  }
 });
 
 //完了
-app.put("/api/monos/:id", (req, res) => {
-  console.log("受信データ:", req.body);
+app.put("/api/monos/:id", async (req, res) => {
+  try {
+    console.log("受信データ:", req.body);
 
-  const id = req.params.id;
-  const { text, category, detail } = req.body;
+    const id = req.params.id;
+    const { text, category, detail } = req.body;
 
-  db.run(
-    "UPDATE monos SET text=?, category=?, detail=? WHERE id=?",
-    [text, category, detail, id],
-    (err) => {
-      if (err) return res.status(500).send(err);
-      res.json({ message: "更新OK" });
-    }
-  );
+    await pool.query(
+      `
+      UPDATE monos
+      SET text = $1,
+          category = $2,
+          detail = $3
+      WHERE id = $4
+      `,
+      [text, category, detail, id]
+    );
+
+    res.json({ message: "更新OK" });
+
+  } catch (err) {
+    res.status(500).send(err);
+  }
 });
 
 
 //順番整理
-db.all("SELECT id FROM monos ORDER BY sort ASC", (err, rows) => {
-  const stmt = db.prepare("UPDATE monos SET sort = ? WHERE id = ?");
+async function normalizeMonoSort() {
+  try {
+    const result = await pool.query(
+      "SELECT id FROM monos ORDER BY sort ASC"
+    );
 
-  rows.forEach((row, index) => {
-    stmt.run(index, row.id);
-  });
+    for (const [index, row] of result.rows.entries()) {
+      await pool.query(
+        "UPDATE monos SET sort = $1 WHERE id = $2",
+        [index, row.id]
+      );
+    }
 
-  stmt.finalize();
-});
+  } catch (err) {
+    console.error(err);
+  }
+}
+
+normalizeMonoSort();
 
 // カテゴリーの取得
 //カテゴリーの順番の取得
-app.get("/api/categories", (req, res) => {
-  db.all("SELECT * FROM categories ORDER BY sort ASC", [], (err, rows) => {
-    res.json(rows);
-  });
+app.get("/api/categories", async (req, res) => {
+  try {
+    const result = await pool.query(
+      "SELECT * FROM categories ORDER BY sort ASC"
+    );
+
+    res.json(result.rows);
+
+  } catch (err) {
+    res.status(500).send(err);
+  }
 });
 
 //カテゴリーの順番を記録
-app.put("/api/categories/reorder", (req, res) => {
-  const { items } = req.body; // [{id, sort}]
+app.put("/api/categories/reorder", async (req, res) => {
+  try {
+    const { items } = req.body;
 
-  const stmt = db.prepare("UPDATE categories SET sort = ? WHERE id = ?");
+    for (const item of items) {
+      await pool.query(
+        "UPDATE categories SET sort = $1 WHERE id = $2",
+        [item.sort, item.id]
+      );
+    }
 
-  items.forEach((item) => {
-    stmt.run(item.sort, item.id);
-  });
+    res.json({ message: "並び順更新OK" });
 
-  stmt.finalize();
-
-  res.json({ message: "並び順更新OK" });
+  } catch (err) {
+    res.status(500).send(err);
+  }
 });
 
 
 //カテゴリー編集
-app.put("/api/categories/:id", (req, res) => {
-  const id = req.params.id;
-  const { name: newName } = req.body;
+app.put("/api/categories/:id", async (req, res) => {
+  try {
+    const id = req.params.id;
+    const { name: newName } = req.body;
 
-  // まず元の名前を取得
-  db.get("SELECT name FROM categories WHERE id = ?", [id], (err, row) => {
-    if (err) return res.status(500).send(err);
-
-    const oldName = row.name;
-
-    //categories更新
-    db.run(
-      "UPDATE categories SET name = ? WHERE id = ?",
-      [newName, id],
-      (err) => {
-        if (err) return res.status(500).send(err);
-
-        db.run(
-          "UPDATE monos SET category = ? WHERE category = ?",
-          [newName, oldName],
-          (err) => {
-            if (err) return res.status(500).send(err);
-
-            res.json({ message: "更新OK" });
-          }
-        );
-      }
+    // 元のカテゴリー名取得
+    const result = await pool.query(
+      "SELECT name FROM categories WHERE id = $1",
+      [id]
     );
-  });
+
+    const oldName = result.rows[0].name;
+
+    // categories更新
+    await pool.query(
+      "UPDATE categories SET name = $1 WHERE id = $2",
+      [newName, id]
+    );
+
+    // monos側も更新
+    await pool.query(
+      "UPDATE monos SET category = $1 WHERE category = $2",
+      [newName, oldName]
+    );
+
+    res.json({ message: "更新OK" });
+
+  } catch (err) {
+    res.status(500).send(err);
+  }
 });
 
 // カテゴリーの追加
-app.post("/api/categories", (req, res) => {
-  const { name } = req.body;
+app.post("/api/categories", async (req, res) => {
+  try {
+    const { name } = req.body;
 
-  db.get("SELECT MAX(sort) as max FROM categories", (err, row) => {
-    if (err) return res.status(500).send(err);
-
-    const nextSort = (row.max || 0) + 1;
-
-    db.run(
-      "INSERT INTO categories (name, sort) VALUES (?, ?)",
-      [name, nextSort],
-      function (err) {
-        if (err) return res.status(500).send(err);
-
-        res.json({
-          id: this.lastID,
-          name,
-          sort: nextSort
-        });
-      }
+    // 現在の最大sort取得
+    const maxResult = await pool.query(
+      "SELECT MAX(sort) as max FROM categories"
     );
-  });
+
+    const nextSort = (maxResult.rows[0].max || 0) + 1;
+
+    // INSERT
+    const result = await pool.query(
+      `
+      INSERT INTO categories (name, sort)
+      VALUES ($1, $2)
+      RETURNING *
+      `,
+      [name, nextSort]
+    );
+
+    res.json(result.rows[0]);
+
+  } catch (err) {
+    res.status(500).send(err);
+  }
 });
 
 // カテゴリー削除
-app.delete("/api/categories/:id", (req, res) => {
-  const id = req.params.id;
+app.delete("/api/categories/:id", async (req, res) => {
+  try {
+    const id = req.params.id;
 
-  db.get("SELECT name FROM categories WHERE id = ?", [id], (err, row) => {
-    if (row.name === "未分類") {
-      return res.status(400).json({ message: "未分類は削除できません" });
+    // カテゴリー取得
+    const result = await pool.query(
+      "SELECT name FROM categories WHERE id = $1",
+      [id]
+    );
+
+    const categoryName = result.rows[0].name;
+
+    // 未分類は削除禁止
+    if (categoryName === "未分類") {
+      return res.status(400).json({
+        message: "未分類は削除できません"
+      });
     }
 
-    const categoryName = row.name;
+    // カテゴリー削除
+    await pool.query(
+      "DELETE FROM categories WHERE id = $1",
+      [id]
+    );
 
-    db.run("DELETE FROM categories WHERE id = ?", [id]);
-    db.run(
-      "UPDATE monos SET category = '未分類' WHERE category = ?",
+    // monos側を未分類へ
+    await pool.query(
+      "UPDATE monos SET category = '未分類' WHERE category = $1",
       [categoryName]
     );
 
     res.json({ message: "削除OK" });
-  });
+
+  } catch (err) {
+    res.status(500).send(err);
+  }
 });
 
-
-// 最後に起動
 const PORT = process.env.PORT || 3000;
 
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
+async function startServer() {
+  await initDB();
+  await insertDefaultCategories();
+  await normalizeMonoSort();
+
+  app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+  });
+}
+
+startServer();
