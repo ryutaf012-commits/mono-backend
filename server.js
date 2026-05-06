@@ -61,7 +61,6 @@ async function initDB() {
   `);
 }
 
-initDB();
 
 
 
@@ -87,7 +86,6 @@ async function insertDefaultCategories() {
   }
 }
 
-insertDefaultCategories();
 
 const app = express();
 
@@ -222,7 +220,24 @@ async function normalizeMonoSort() {
   }
 }
 
-normalizeMonoSort();
+
+//重複削除
+async function removeDuplicateCategories() {
+  try {
+    await pool.query(`
+      DELETE FROM categories a
+      USING categories b
+      WHERE a.id > b.id
+      AND a.name = b.name
+    `);
+
+    console.log("重複カテゴリー整理OK");
+
+  } catch (err) {
+    console.error(err);
+  }
+}
+
 
 // カテゴリーの取得
 //カテゴリーの順番の取得
@@ -297,6 +312,17 @@ app.post("/api/categories", async (req, res) => {
   try {
     const { name } = req.body;
 
+    const exists = await pool.query(
+      "SELECT * FROM categories WHERE name = $1",
+      [name]
+    );
+
+    if (exists.rows.length > 0) {
+      return res.status(400).json({
+        message: "同じカテゴリーがあります"
+      });
+    }
+
     // 現在の最大sort取得
     const maxResult = await pool.query(
       "SELECT MAX(sort) as max FROM categories"
@@ -364,6 +390,7 @@ const PORT = process.env.PORT || 3000;
 
 async function startServer() {
   await initDB();
+  await removeDuplicateCategories();
   await insertDefaultCategories();
   await normalizeMonoSort();
 
